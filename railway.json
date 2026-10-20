@@ -1,0 +1,11 @@
+{
+  "build": {
+    "builder": "nixpacks",
+    "buildCommand": "pip install -r requirements.txt"
+  },
+  "deploy": {
+    "startCommand": "uvicorn confidence_api:app --host 0.0.0.0 --port $PORT",
+    "restartPolicyType": "on_failure",
+    "restartPolicyMaxRetries": 5
+  }
+}
