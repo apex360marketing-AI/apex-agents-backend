@@ -18,14 +18,67 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 from datetime import datetime
+from enum import Enum
 import json
 import csv
 import io
 import asyncio
+import logging
+import os
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Import the confidence engine
 from confidence_engine import ConfidenceEngineV1, LeadSignalHistory, BehavioralSignal
 from signup_system import SignupSystem, SignupRequest
+
+# Environment configuration
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+
+# CORS allowed origins based on environment
+if ENVIRONMENT == "production":
+    ALLOWED_ORIGINS = [
+        "https://apex-agents-frontend.vercel.app",
+        "https://www.yourdomain.com",
+    ]
+else:
+    ALLOWED_ORIGINS = [
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+    ]
+
+# ============================================================================
+# Enums for Input Validation
+# ============================================================================
+
+class VerticalEnum(str, Enum):
+    """Valid industry verticals"""
+    SAAS = "saas"
+    FINTECH = "fintech"
+    ECOMMERCE = "ecommerce"
+    AGENCY = "agency"
+    OTHER = "other"
+
+
+class FieldTypeEnum(str, Enum):
+    """Valid custom field types"""
+    TEXT = "text"
+    NUMBER = "number"
+    SELECT = "select"
+    DATE = "date"
+
+
+class CompanySizeEnum(str, Enum):
+    """Valid company sizes"""
+    SMALL = "small"
+    MID_MARKET = "mid-market"
+    ENTERPRISE = "enterprise"
 
 app = FastAPI(
     title="Apex Confidence Engine API",
@@ -50,10 +103,10 @@ app.add_middleware(SecurityHeadersMiddleware)
 # Add CORS support for frontend requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict to your domain
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Initialize engine
@@ -61,6 +114,44 @@ engine = ConfidenceEngineV1()
 
 # Initialize signup system
 signup_system = SignupSystem()
+
+
+# ============================================================================
+# Dependencies & Helper Functions
+# ============================================================================
+
+def get_client_ip(request: Request) -> str:
+    """Extract client IP address from request headers"""
+    if request.client:
+        return request.client.host
+    # Fallback to X-Forwarded-For header if behind proxy
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return "unknown"
+
+
+def validate_request_content(request: Request) -> None:
+    """Validate request content type and size"""
+    content_type = request.headers.get("content-type", "").lower()
+    if content_type and "application/json" not in content_type:
+        raise HTTPException(
+            status_code=415,
+            detail="Content-Type must be application/json"
+        )
+
+    # Validate payload size (10MB limit)
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            size_mb = int(content_length) / (1024 * 1024)
+            if size_mb > 10:
+                raise HTTPException(
+                    status_code=413,
+                    detail="Payload too large. Maximum size is 10MB."
+                )
+        except ValueError:
+            pass
 
 
 # ============================================================================
@@ -80,7 +171,7 @@ class ScoreRequest(BaseModel):
     lead_id: str
     email: str
     company: str
-    vertical: str  # 'saas', 'fintech', 'ecommerce', 'agency', 'other'
+    vertical: VerticalEnum
     signals: List[SignalRequest]
 
 
@@ -109,8 +200,8 @@ class SignupRequestBody(BaseModel):
     last_name: str
     email: str
     company: str
-    vertical: str  # 'saas', 'fintech', 'ecommerce'
-    company_size: str  # 'small', 'mid-market', 'enterprise'
+    vertical: VerticalEnum
+    company_size: CompanySizeEnum
     phone: Optional[str] = None
 
 
@@ -136,7 +227,7 @@ class TrialStatusResponse(BaseModel):
 class CustomFieldRequest(BaseModel):
     """Custom field creation/update request"""
     field_name: str
-    field_type: str  # 'text', 'number', 'select', 'date'
+    field_type: FieldTypeEnum
     required: bool = False
     options: Optional[List[str]] = None  # For select fields
 
@@ -233,18 +324,31 @@ async def score_lead(request: ScoreRequest) -> ScoreResponse:
         return ScoreResponse(**result)
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error scoring lead: {str(e)}")
+        logger.error(f"Error scoring lead", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to score lead. Please try again.")
 
 
 @app.post("/score_batch")
-async def score_batch(request: BatchScoreRequest, background_tasks: BackgroundTasks) -> Dict:
+async def score_batch(request: BatchScoreRequest, background_tasks: BackgroundTasks, authorization: Optional[str] = Header(None)) -> Dict:
     """
     Score multiple leads at once (async with job tracking).
 
     Returns immediately with job_id. Poll /api/batch/{job_id}/status for progress.
     """
+    # Check authentication
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid API key")
+
+    api_key = authorization.replace("Bearer ", "").strip()
+    status = signup_system.get_trial_status(api_key)
+    if not status:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    user_id = status.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
     try:
-        user_id = "default_user"  # TODO: Extract from auth header
         job_id = signup_system.create_batch_job(user_id, len(request.leads), None)
 
         background_tasks.add_task(process_batch_scoring, job_id, request.leads, user_id)
@@ -257,7 +361,8 @@ async def score_batch(request: BatchScoreRequest, background_tasks: BackgroundTa
             "message": f"Batch job {job_id} queued for processing"
         }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error creating batch job: {str(e)}")
+        logger.error(f"Error creating batch job", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to create batch job. Please try again.")
 
 
 async def process_batch_scoring(job_id: str, leads: List[ScoreRequest], user_id: str):
@@ -365,7 +470,7 @@ async def get_stats() -> Dict:
 # ============================================================================
 
 @app.post("/api/signup", response_model=SignupResponse)
-async def create_trial_signup(request: SignupRequestBody) -> SignupResponse:
+async def create_trial_signup(request: SignupRequestBody, client_ip: str = Depends(get_client_ip)) -> SignupResponse:
     """
     Create a free trial account for a new user.
 
@@ -374,6 +479,14 @@ async def create_trial_signup(request: SignupRequestBody) -> SignupResponse:
     - trial_days: 14 days free
     - trial_expires_at: ISO timestamp when trial expires
     """
+    # Check rate limit
+    if not signup_system.check_rate_limit(client_ip, "/api/signup"):
+        logger.warning(f"Rate limit exceeded for IP {client_ip} on /api/signup")
+        raise HTTPException(
+            status_code=429,
+            detail="Too many signup attempts. Please try again later."
+        )
+
     try:
         # Create signup request
         signup_req = SignupRequest(
@@ -399,9 +512,11 @@ async def create_trial_signup(request: SignupRequestBody) -> SignupResponse:
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.warning(f"Signup validation error", exc_info=e)
+        raise HTTPException(status_code=400, detail="Invalid signup data. Please check your input.")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Signup error: {str(e)}")
+        logger.error(f"Signup error", exc_info=e)
+        raise HTTPException(status_code=500, detail="Unable to create trial account. Please try again.")
 
 
 @app.get("/trial/status")
@@ -442,7 +557,8 @@ async def get_trial_status(authorization: Optional[str] = Header(None)) -> Trial
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching trial status: {str(e)}")
+        logger.error(f"Error fetching trial status", exc_info=e)
+        raise HTTPException(status_code=500, detail="Unable to fetch trial status. Please try again.")
 
 
 # ============================================================================
@@ -470,7 +586,8 @@ async def get_batch_status(job_id: str, authorization: Optional[str] = Header(No
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error fetching batch status: {str(e)}")
+        logger.error(f"Error fetching batch status", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to fetch batch status. Please try again.")
 
 
 @app.get("/api/batch/{job_id}/results")
@@ -506,7 +623,8 @@ async def get_batch_results(job_id: str, format: str = "json", authorization: Op
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error fetching batch results: {str(e)}")
+        logger.error(f"Error fetching batch results", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to fetch batch results. Please try again.")
 
 
 # ============================================================================
@@ -527,7 +645,9 @@ async def rotate_api_key(authorization: Optional[str] = Header(None)) -> Dict:
         if not status:
             raise HTTPException(status_code=401, detail="Invalid API key")
 
-        user_id = status.get("user_id", "default_user")
+        user_id = status.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid API key")
 
         # Rotate the key
         new_key = signup_system.rotate_api_key(user_id)
@@ -541,7 +661,8 @@ async def rotate_api_key(authorization: Optional[str] = Header(None)) -> Dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error rotating API key: {str(e)}")
+        logger.error(f"Error rotating API key", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to rotate API key. Please try again.")
 
 
 @app.delete("/api/keys/{key_id}")
@@ -557,7 +678,9 @@ async def revoke_api_key(key_id: str, authorization: Optional[str] = Header(None
         if not status:
             raise HTTPException(status_code=401, detail="Invalid API key")
 
-        user_id = status.get("user_id", "default_user")
+        user_id = status.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid API key")
 
         signup_system.revoke_api_key(user_id, key_id)
 
@@ -569,7 +692,8 @@ async def revoke_api_key(key_id: str, authorization: Optional[str] = Header(None
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error revoking API key: {str(e)}")
+        logger.error(f"Error revoking API key", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to revoke API key. Please try again.")
 
 
 @app.get("/api/keys")
@@ -585,7 +709,9 @@ async def list_api_keys(authorization: Optional[str] = Header(None)) -> Dict:
         if not status:
             raise HTTPException(status_code=401, detail="Invalid API key")
 
-        user_id = status.get("user_id", "default_user")
+        user_id = status.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid API key")
         valid_keys = signup_system.get_valid_api_keys(user_id)
 
         return {
@@ -604,7 +730,8 @@ async def list_api_keys(authorization: Optional[str] = Header(None)) -> Dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error listing API keys: {str(e)}")
+        logger.error(f"Error listing API keys", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to list API keys. Please try again.")
 
 
 # ============================================================================
@@ -623,7 +750,9 @@ async def create_custom_field(request: CustomFieldRequest, authorization: Option
         if not status:
             raise HTTPException(status_code=401, detail="Invalid API key")
 
-        user_id = status.get("user_id", "default_user")
+        user_id = status.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid API key")
 
         # Validate field type
         valid_types = ["text", "number", "select", "date"]
@@ -648,7 +777,8 @@ async def create_custom_field(request: CustomFieldRequest, authorization: Option
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error creating custom field: {str(e)}")
+        logger.error(f"Error creating custom field", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to create custom field. Please try again.")
 
 
 @app.get("/api/custom-fields")
@@ -663,7 +793,9 @@ async def list_custom_fields(authorization: Optional[str] = Header(None)) -> Dic
         if not status:
             raise HTTPException(status_code=401, detail="Invalid API key")
 
-        user_id = status.get("user_id", "default_user")
+        user_id = status.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid API key")
 
         return {
             "success": True,
@@ -673,7 +805,8 @@ async def list_custom_fields(authorization: Optional[str] = Header(None)) -> Dic
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error listing custom fields: {str(e)}")
+        logger.error(f"Error listing custom fields", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to list custom fields. Please try again.")
 
 
 @app.put("/api/custom-fields/{field_id}")
@@ -688,7 +821,9 @@ async def update_custom_field(field_id: str, request: CustomFieldRequest, author
         if not status:
             raise HTTPException(status_code=401, detail="Invalid API key")
 
-        user_id = status.get("user_id", "default_user")
+        user_id = status.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid API key")
 
         return CustomFieldResponse(
             field_id=field_id,
@@ -702,7 +837,8 @@ async def update_custom_field(field_id: str, request: CustomFieldRequest, author
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error updating custom field: {str(e)}")
+        logger.error(f"Error updating custom field", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to update custom field. Please try again.")
 
 
 @app.delete("/api/custom-fields/{field_id}")
@@ -725,7 +861,8 @@ async def delete_custom_field(field_id: str, authorization: Optional[str] = Head
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error deleting custom field: {str(e)}")
+        logger.error(f"Error deleting custom field", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to delete custom field. Please try again.")
 
 
 @app.patch("/api/leads/{lead_id}/custom-data")
@@ -749,7 +886,8 @@ async def update_lead_custom_data(lead_id: str, request: UpdateLeadCustomDataReq
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error updating lead custom data: {str(e)}")
+        logger.error(f"Error updating lead custom data", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to update lead data. Please try again.")
 
 
 # ============================================================================
@@ -790,7 +928,8 @@ async def get_scoring_breakdown(lead_id: str, authorization: Optional[str] = Hea
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error fetching scoring breakdown: {str(e)}")
+        logger.error(f"Error fetching scoring breakdown", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to fetch scoring breakdown. Please try again.")
 
 
 @app.post("/api/leads/{lead_id}/score-with-breakdown")
@@ -812,7 +951,8 @@ async def score_lead_with_breakdown(lead_id: str, request: ScoreRequest, authori
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error scoring lead with breakdown: {str(e)}")
+        logger.error(f"Error scoring lead with breakdown", exc_info=e)
+        raise HTTPException(status_code=400, detail="Unable to score lead. Please try again.")
 
 
 # ============================================================================

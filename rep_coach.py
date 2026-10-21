@@ -15,6 +15,9 @@ from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional
 from datetime import datetime
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -362,15 +365,7 @@ Sarah""",
     )
 
     result = coach.coach_email(email1)
-    print("=== COACHING RESULT: HIGH-QUALITY EMAIL ===")
-    print(f"Overall Score: {result['overall_score']}/100 ({result['overall_grade']})")
-    print(f"\nSubject Line: {result['subject_line']['grade']}")
-    print(f"  Feedback: {', '.join(result['subject_line']['feedback'][:2])}")
-    print(f"\nEmail Body: {result['email_body']['grade']}")
-    print(f"  Word count: {result['email_body']['word_count']}")
-    print(f"  Feedback: {', '.join(result['email_body']['feedback'][:2])}")
-    print(f"\nRecommendation: {result['recommendation']}")
-    print()
+    logger.debug(f"=== COACHING RESULT: HIGH-QUALITY EMAIL === Score: {result['overall_score']}/100 ({result['overall_grade']}) Subject: {result['subject_line']['grade']} Body: {result['email_body']['grade']} Recommendation: {result['recommendation']}")
 
     # Example 2: Low-quality email
     email2 = SentEmail(
@@ -392,9 +387,5 @@ Mike""",
     )
 
     result = coach.coach_email(email2)
-    print("=== COACHING RESULT: LOW-QUALITY EMAIL ===")
-    print(f"Overall Score: {result['overall_score']}/100 ({result['overall_grade']})")
-    print(f"\nAction Items:")
-    for item in result['action_items']:
-        print(f"  - {item}")
-    print(f"\nRecommendation: {result['recommendation']}")
+    action_items_str = ", ".join(result['action_items'])
+    logger.debug(f"=== COACHING RESULT: LOW-QUALITY EMAIL === Score: {result['overall_score']}/100 ({result['overall_grade']}) Action Items: {action_items_str} Recommendation: {result['recommendation']}")

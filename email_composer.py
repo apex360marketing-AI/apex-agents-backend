@@ -13,6 +13,9 @@ from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional
 from datetime import datetime
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -381,12 +384,7 @@ if __name__ == '__main__':
     )
 
     email1 = composer.compose(prospect1)
-    print("=== EMAIL FOR SAAS VP SALES ===")
-    print(f"Subject: {email1.subject}")
-    print(f"\n{email1.body}")
-    print(f"\nOpen rate estimate: {email1.estimated_open_rate * 100:.0f}%")
-    print(f"Click rate estimate: {email1.estimated_click_rate * 100:.0f}%")
-    print()
+    logger.debug(f"=== EMAIL FOR SAAS VP SALES === Subject: {email1.subject} Body: {email1.body} Open rate: {email1.estimated_open_rate * 100:.0f}% Click rate: {email1.estimated_click_rate * 100:.0f}%")
 
     # Example 2: Fintech Compliance Officer
     prospect2 = Prospect(
@@ -402,16 +400,13 @@ if __name__ == '__main__':
     )
 
     email2 = composer.compose(prospect2)
-    print("=== EMAIL FOR FINTECH CCO ===")
-    print(f"Subject: {email2.subject}")
-    print(f"\n{email2.body}")
-    print(f"\nOpen rate estimate: {email2.estimated_open_rate * 100:.0f}%")
-    print()
+    logger.debug(f"=== EMAIL FOR FINTECH CCO === Subject: {email2.subject} Body: {email2.body} Open rate: {email2.estimated_open_rate * 100:.0f}%")
 
     # Example 3: Show sequence
     sequence = SequenceBuilder.get_sequence('saas')
-    print("=== SAAS EMAIL SEQUENCE ===")
+    logger.debug(f"=== SAAS EMAIL SEQUENCE ===")
     for step in sequence:
-        print(f"Day {step.day}: {step.channel.upper()} ({step.message_template})")
         if step.fallback_channel:
-            print(f"  Fallback after {step.fallback_delay_days} days: {step.fallback_channel.upper()}")
+            logger.debug(f"Day {step.day}: {step.channel.upper()} ({step.message_template}) Fallback after {step.fallback_delay_days} days: {step.fallback_channel.upper()}")
+        else:
+            logger.debug(f"Day {step.day}: {step.channel.upper()} ({step.message_template})")

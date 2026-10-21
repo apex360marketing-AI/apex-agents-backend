@@ -12,10 +12,13 @@ Target accuracy: 70%+ (detect active opportunities vs stale/uninterested leads)
 """
 
 import json
+import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 import math
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -298,9 +301,7 @@ if __name__ == '__main__':
     )
 
     result = engine.score(hot_lead)
-    print("=== HOT LEAD ===")
-    print(json.dumps(result, indent=2, default=str))
-    print()
+    logger.debug(f"=== HOT LEAD === {json.dumps(result, indent=2, default=str)}")
 
     # Example 2: Cold lead (no recent activity)
     cold_lead = LeadSignalHistory(
@@ -315,9 +316,7 @@ if __name__ == '__main__':
     )
 
     result = engine.score(cold_lead)
-    print("=== COLD LEAD ===")
-    print(json.dumps(result, indent=2, default=str))
-    print()
+    logger.debug(f"=== COLD LEAD === {json.dumps(result, indent=2, default=str)}")
 
     # Example 3: Medium lead (some signals, but not recent)
     medium_lead = LeadSignalHistory(
@@ -334,5 +333,4 @@ if __name__ == '__main__':
     )
 
     result = engine.score(medium_lead)
-    print("=== MEDIUM LEAD ===")
-    print(json.dumps(result, indent=2, default=str))
+    logger.debug(f"=== MEDIUM LEAD === {json.dumps(result, indent=2, default=str)}")
